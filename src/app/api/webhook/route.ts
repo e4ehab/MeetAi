@@ -69,10 +69,13 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "Missing meetingId" }, { status: 400 });
         }
 
-        // find an exiting meeting in our db under certain conditions
-        const [existingMeeting] = await db
-            .select()
-            .from(meetings)
+        // Atomically activate once; only the request that flips status can continue.
+        const [activatedMeeting] = await db
+            .update(meetings)
+            .set({
+                status: "active",
+                startedAt: new Date(),
+            })
             .where(
                 and(
                     eq(meetings.id, meetingId),
@@ -81,30 +84,20 @@ export async function POST(req: NextRequest) {
                     not(eq(meetings.status, "cancelled")),
                     not(eq(meetings.status, "processing"))
                 )
-            );
-        if (!existingMeeting) {
-            return NextResponse.json({ error: "Meeting Not Found" }, { status: 404 });
-        }
+            )
+            .returning();
 
-        /*
-            if the meeting exists update it's status to active ASAP, as we 're going to connect the agent,
-            so if this event (session_started) fires multiple times it will connect multiple agents which is not good
-            so even if it's fires next time [existingMeeting] this will fail to connect another agent
-        */
-        await db
-            .update(meetings)
-            .set({
-                status: "active",
-                startedAt: new Date(),
-            })
-            .where(eq(meetings.id, existingMeeting.id))
+        // Webhooks can be retried/duplicated; if already activated, do nothing.
+        if (!activatedMeeting) {
+            return NextResponse.json({ status: "ok" });
+        }
 
         // find the existing agent for this meeting
         const [existingAgent] = await db
             .select()
             .from(agents)
             .where(
-                eq(agents.id, existingMeeting.agentId)
+                eq(agents.id, activatedMeeting.agentId)
             )
 
         if (!existingAgent) {
